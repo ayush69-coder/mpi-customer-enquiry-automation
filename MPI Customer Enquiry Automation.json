@@ -1,0 +1,490 @@
+{
+  "name": "MPI Customer Enquiry Automation",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c288979a-61b5-4594-9752-1a6432889f5d",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "enquiry_id",
+              "value": "MPI-TEST-004",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "source",
+              "value": "Website",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "raw_text",
+              "value": "We need 2000 paper cans, 80 mm diameter and 150 mm height for coffee packaging. Delivery to Delhi. Printed artwork required.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2c16c47e-8a55-4a22-b37a-0462c590f810",
+      "name": "Enquiry Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        224,
+        0
+      ],
+      "notesInFlow": true,
+      "notes": "EDIT ME: change enquiry_id, source and raw_text here to test other enquiries. No configuration needed otherwise."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "AQ.Ab8RN6Kj3_jUUX_Zz7bfptPG9g8DxZqtHG-0zpQtWaxJXDmutA"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: \"You extract structured sales-lead data from customer enquiries for Moti Packaging Industries (paper cans / packaging). Return ONLY a valid JSON object with exactly these keys: customer_name, company_name, contact, product_category, diameter_mm, height_mm, quantity, application, printing_requirement, delivery_location, required_date, missing_fields, conflicting_fields, technical_concerns, human_review_required. RULES: Never guess or infer missing details; use null for any unknown value. diameter_mm, height_mm and quantity must be numbers or null. required_date must be YYYY-MM-DD or null. printing_requirement is a short string describing printing/artwork needs, or null. missing_fields, conflicting_fields and technical_concerns are arrays of strings (empty array if none). human_review_required is true or false. Enquiry source: \" + $json.source + \". Enquiry text: \" + $json.raw_text }] }], generationConfig: { temperature: 0, responseMimeType: \"application/json\" } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "92336284-8cd7-4106-8816-257aa8ccc832",
+      "name": "Gemini Extract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        448,
+        0
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "CONFIGURE: select/create the \"Google Gemini(PaLM) API\" credential and paste your Gemini API key there (never in the node). Retries 3 times on temporary failures; if still failing, the enquiry continues to the Validate node and is saved as \"Processing failed\"."
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst input = $('Enquiry Input').first().json;\nconst gemini = $('Gemini Extract').first().json;\n\nconst rawText = String(\n  input.Raw_Enquiry ??\n  input.raw_text ??\n  input.enquiry ??\n  input.text ??\n  ''\n);\n\n// Extract the actual Gemini response\nconst responseText =\n  gemini.candidates?.[0]?.content?.parts?.[0]?.text;\n\nif (!responseText) {\n  throw new Error('Gemini returned no text content.');\n}\n\nlet ai;\ntry {\n  ai = JSON.parse(responseText);\n} catch (e) {\n  throw new Error('Gemini response was not valid JSON: ' + e.message);\n}\n\nconst clean = (value) =>\n  value === null || value === undefined || value === ''\n    ? ''\n    : value;\n\nconst missingFields = Array.isArray(ai.missing_fields)\n  ? ai.missing_fields\n  : [];\n\nconst humanReview =\n  ai.human_review_required === true ||\n  (Array.isArray(ai.conflicting_fields) &&\n    ai.conflicting_fields.length > 0) ||\n  (Array.isArray(ai.technical_concerns) &&\n    ai.technical_concerns.length > 0);\n\nconst requiredDate = clean(ai.required_date);\n\nconst rec = {\n  enquiry_id:\n    input.enquiry_id ||\n    input.Enquiry_ID ||\n    input['Enquiry id'] ||\n    'MPI-TEST-003',\n\n  received_at: input.Received_At || new Date().toISOString(),\n  source: input.source || input.Source || 'Website',\n  raw_text: rawText,\n\n  customer_name: clean(ai.customer_name),\n  company_name: clean(ai.company_name),\n  contact: clean(ai.contact),\n  product_category: clean(ai.product_category),\n  diameter_mm: ai.diameter_mm ?? '',\n  height_mm: ai.height_mm ?? '',\n  quantity: ai.quantity ?? '',\n  application: clean(ai.application),\n\n  // Keep the existing Google Sheets field name\n  printing_required: clean(ai.printing_requirement),\n\n  delivery_location: clean(ai.delivery_location),\n  required_date: requiredDate,\n\n  missing_fields: missingFields,\n  conflicting_fields: Array.isArray(ai.conflicting_fields)\n    ? ai.conflicting_fields\n    : [],\n\n  technical_concerns: Array.isArray(ai.technical_concerns)\n    ? ai.technical_concerns\n    : [],\n\n  lead_status: missingFields.length > 0\n    ? 'More information required'\n    : 'Needs review',\n\n  duplicate_of: '',\n  human_review: humanReview ? 'Yes' : 'No',\n\n  followup_draft:\n    'DRAFT - NOT SENT. Human approval required.\\n\\n' +\n    'Dear Customer,\\n\\n' +\n    'Thank you for contacting Moti Packaging Industries.\\n' +\n    'We have recorded your enquiry for ' +\n    (clean(ai.product_category) || 'packaging') + '.\\n' +\n    'Quantity: ' + (ai.quantity ?? 'Not provided') + '\\n' +\n    'Dimensions: ' + (ai.diameter_mm ?? 'Not provided') +\n    ' mm diameter x ' + (ai.height_mm ?? 'Not provided') +\n    ' mm height\\n' +\n    'Application: ' + (clean(ai.application) || 'Not provided') + '\\n' +\n    'Delivery location: ' +\n    (clean(ai.delivery_location) || 'Not provided') + '\\n\\n' +\n    (missingFields.length\n      ? 'Please provide the following missing details: ' +\n        missingFields.join(', ') + '.\\n\\n'\n      : '') +\n    'Our team will review the specifications before confirming a quotation.\\n\\n' +\n    'Regards,\\nMoti Packaging Industries',\n\n  error: '',\n  rules_pending: true,\n  test_mode: true\n};\n\nreturn [{ json: rec }];\n"
+      },
+      "id": "fb2d54b0-dab1-4294-986c-fa4e959c6155",
+      "name": "Validate AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "notesInFlow": true,
+      "notes": "CONFIGURE: edit the RULES block at the top of the code once your manufacturing rules are approved (approved: true + limits). Until then no enquiry can be \"Ready for quotation\". Handles API errors, empty and invalid JSON by saving a \"Processing failed\" record."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1TMIpjsUjKfjZYY-17iTrtwaiRZghTM_ur6xHTUeKzd0/edit?usp=sharing",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TMIpjsUjKfjZYY-17iTrtwaiRZghTM_ur6xHTUeKzd0/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "586a820d-7e42-4d34-9e92-d7b0964e8328",
+      "name": "Lookup Existing Enquiries",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        896,
+        0
+      ],
+      "notesInFlow": true,
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "979AS5TJmgy9SMTE",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "CONFIGURE: connect Google Sheets credentials and pick your Enquiries spreadsheet + sheet (same one as the Save node). Reads all existing rows so the next node can compare contact + enquiry details. If this node is not configured or fails, the enquiry still continues and is flagged \"duplicate check not run\"."
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst rec = Object.assign({}, $('Validate AI Response').first().json);\nconst rows = $input.all().map(i => i.json);\n\nfunction val(row, ...keys) {\n  for (const key of keys) {\n    if (row[key] !== undefined && row[key] !== null && row[key] !== '') {\n      return row[key];\n    }\n  }\n  return '';\n}\n\nfunction normContact(c) {\n  if (!c) return '';\n  const s = String(c).trim().toLowerCase();\n  return s.includes('@') ? s : s.replace(/\\D/g, '');\n}\n\nfunction same(a, b) {\n  if (a === '' || a === null || a === undefined ||\n      b === '' || b === null || b === undefined) return false;\n  return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();\n}\n\nconst existing = rows.map(r => ({\n  enquiry_id: val(r, 'Enquiry_ID', 'Enquiry id', 'enquiry_id'),\n  contact: val(r, 'Contact', 'contact'),\n  product_category: val(r, 'Product_Category', 'product_category'),\n  diameter_mm: val(r, 'Diameter_mm', 'diameter_mm'),\n  height_mm: val(r, 'Height_mm', 'height_mm'),\n  quantity: val(r, 'Quantity', 'quantity'),\n  delivery_location: val(r, 'Delivery_Location', 'delivery_location'),\n  lead_status: val(r, 'Lead_Status', 'lead_status')\n})).filter(r => r.enquiry_id);\n\nconst myContact = normContact(rec.contact);\nconst matches = [];\n\nfor (const r of existing) {\n  // Same enquiry ID is the same record, not a duplicate of itself.\n  if (String(r.enquiry_id) === String(rec.enquiry_id)) continue;\n\n  const sameDims =\n    same(r.diameter_mm, rec.diameter_mm) &&\n    same(r.height_mm, rec.height_mm) &&\n    same(r.quantity, rec.quantity);\n\n  const sameContact =\n    myContact !== '' && normContact(r.contact) === myContact;\n\n  const sameSpec =\n    sameDims &&\n    same(r.product_category, rec.product_category) &&\n    same(r.delivery_location, rec.delivery_location);\n\n  if ((sameContact && sameDims) || sameSpec) {\n    matches.push(String(r.enquiry_id));\n  }\n}\n\nif (matches.length) {\n  rec.duplicate_of = matches.join(', ');\n  rec.lead_status = 'Possible duplicate enquiry';\n  rec.human_review = 'Yes';\n} else {\n  rec.duplicate_of = '';\n}\n\nconst labels = {\n  customer_name: 'your name',\n  contact: 'a contact phone number or email',\n  product_category: 'the product type',\n  diameter_mm: 'the diameter (mm)',\n  height_mm: 'the height (mm)',\n  quantity: 'the required quantity',\n  delivery_location: 'the delivery location',\n  required_date: 'the date you need delivery by'\n};\n\nif (rec.lead_status !== 'Processing failed') {\n  const missing = Array.isArray(rec.missing_fields)\n    ? rec.missing_fields\n    : String(rec.missing_fields || '')\n        .split(',').map(x => x.trim()).filter(Boolean);\n\n  const lines = [\n    'Dear ' + (rec.customer_name || 'Customer') + ',',\n    '',\n    'Thank you for your enquiry to Moti Packaging Industries.',\n    'We have noted your requirements:'\n  ];\n\n  const facts = [\n    ['Product', rec.product_category],\n    ['Diameter', rec.diameter_mm != null ? rec.diameter_mm + ' mm' : null],\n    ['Height', rec.height_mm != null ? rec.height_mm + ' mm' : null],\n    ['Quantity', rec.quantity],\n    ['Application', rec.application],\n    ['Printing', rec.printing_requirement],\n    ['Delivery location', rec.delivery_location],\n    ['Required by', rec.required_date]\n  ];\n\n  for (const [label, value] of facts) {\n    if (value !== null && value !== undefined && value !== '') {\n      lines.push('- ' + label + ': ' + value);\n    }\n  }\n\n  lines.push('');\n  if (missing.length) {\n    lines.push('To help our team prepare an accurate quotation, please share:');\n    for (const field of missing) {\n      lines.push('- ' + (labels[field] || field));\n    }\n  } else {\n    lines.push('Our team will review your requirements and follow up.');\n  }\n\n  lines.push('', 'Regards,', 'Moti Packaging Industries');\n\n  rec.followup_draft =\n    'DRAFT - NOT SENT. Human approval required.\\n\\n' + lines.join('\\n');\n}\n\nreturn [{ json: rec }];\n"
+      },
+      "id": "2fe79d13-57d1-4d1c-898e-d67fcbdaeb75",
+      "name": "Check Duplicates and Draft Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ],
+      "notesInFlow": true,
+      "notes": "No configuration needed. Compares the new enquiry with the sheet rows (contact + dimensions/quantity/product), flags a possible duplicate (keeps both records, deletes nothing) and writes a follow-up DRAFT that only uses verified details. Nothing is sent."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1TMIpjsUjKfjZYY-17iTrtwaiRZghTM_ur6xHTUeKzd0/edit?usp=sharing",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TMIpjsUjKfjZYY-17iTrtwaiRZghTM_ur6xHTUeKzd0/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Enquiry id ": "={{ $json.enquiry_id }}",
+            "Received_At": "={{ $json.received_at }}",
+            "Source": "={{ $json.source }}",
+            "Raw_Enquiry": "={{ $json.raw_text }}",
+            "Customer_Name": "={{ $json.customer_name }}",
+            "Company_Name": "={{ $json.company_name }}",
+            "Contact": "={{ $json.contact }}",
+            "Product_Category": "={{ $json.product_category }}",
+            "Diameter_mm": "={{ $json.diameter_mm }}",
+            "Height_mm": "={{ $json.height_mm }}",
+            "Quantity": "={{ $json.quantity }}",
+            "Application": "={{ $json.application }}",
+            "Printing_Requirement": "={{ $json.printing_required }}",
+            "Delivery_Location": "={{ $json.delivery_location }}",
+            "Required_Date": "={{ $json.required_date }}",
+            "Missing_Fields": "={{ $json.missing_fields }}",
+            "Lead_Status": "={{ $json.lead_status }}",
+            "Duplicate_Of": "={{ $json.duplicate_of }}",
+            "Human_Review": "={{ $json.human_review }}",
+            "Followup_Draft": "={{ $json.followup_draft }}",
+            "Error": "={{ $json.error || '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Enquiry id ",
+              "displayName": "Enquiry id ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Received_At",
+              "displayName": "Received_At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Raw_Enquiry",
+              "displayName": "Raw_Enquiry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Customer_Name",
+              "displayName": "Customer_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Name",
+              "displayName": "Company_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Contact",
+              "displayName": "Contact",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Product_Category",
+              "displayName": "Product_Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Diameter_mm",
+              "displayName": "Diameter_mm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Height_mm",
+              "displayName": "Height_mm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Quantity",
+              "displayName": "Quantity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Application",
+              "displayName": "Application",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Printing_Requirement",
+              "displayName": "Printing_Requirement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Delivery_Location",
+              "displayName": "Delivery_Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Required_Date",
+              "displayName": "Required_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Missing_Fields",
+              "displayName": "Missing_Fields",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lead_Status",
+              "displayName": "Lead_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Duplicate_Of",
+              "displayName": "Duplicate_Of",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Human_Review",
+              "displayName": "Human_Review",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Followup_Draft",
+              "displayName": "Followup_Draft",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Error",
+              "displayName": "Error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "f9a97068-fa4f-4deb-b607-b79eb217b86b",
+      "name": "Save Enquiry to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1344,
+        0
+      ],
+      "notesInFlow": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "979AS5TJmgy9SMTE",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "CONFIGURE: connect Google Sheets credentials and pick the SAME spreadsheet + sheet as the lookup node. Row 1 of the sheet must contain these headers: enquiry_id, received_at, source, raw_text, customer_name, company_name, contact, product_category, diameter_mm, height_mm, quantity, application, printing_requirement, delivery_location, required_date, missing_fields, lead_status, duplicate_of, human_review, followup_draft, error. Failed records are saved with lead_status \"Processing failed\" - filter on it to reprocess."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Enquiry Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enquiry Input": {
+      "main": [
+        [
+          {
+            "node": "Gemini Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Extract": {
+      "main": [
+        [
+          {
+            "node": "Validate AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate AI Response": {
+      "main": [
+        [
+          {
+            "node": "Lookup Existing Enquiries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Existing Enquiries": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicates and Draft Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicates and Draft Reply": {
+      "main": [
+        [
+          {
+            "node": "Save Enquiry to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "986bb7b8-ea71-4c50-a5d3-38946895ba2c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0acec0eb1ffbc21486e26103145a76ddf6eccaafcea32224fe0c011d0738499b"
+  },
+  "nodeGroups": [],
+  "id": "hjltdGutPOd9L46c",
+  "tags": []
+}
